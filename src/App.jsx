@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import * as XLSX from 'xlsx';
-import { Download, PlusCircle, ArrowLeft, Loader2, FileSpreadsheet, Trash2, Scale, Search, Zap, Scissors, Network, Edit3, Filter, X } from 'lucide-react';
+import { Download, PlusCircle, ArrowLeft, Loader2, FileSpreadsheet, Trash2, Scale, Search, Zap, Scissors, Network, Edit3, Filter, X, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
   const [view, setView] = useState('list');
@@ -118,14 +118,14 @@ function CreateProject({ onBack, onCreated }) {
   );
 }
 
-// --- COMPONENTE: EDITOR, DASHBOARD Y FILTROS ---
+// --- COMPONENTE: EDITOR, DASHBOARD Y ESCÁNER UNIVERSAL ---
 function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
   const [materials, setMaterials] = useState([]);
   const [project, setProject] = useState(null);
   const [isEditingInfo, setIsEditingInfo] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [hideZeros, setHideZeros] = useState(false);
-  const [dateFilter, setDateFilter] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
   const [compareData, setCompareData] = useState(null);
 
   useEffect(() => { loadData(); }, [projectId]);
@@ -153,37 +153,55 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
     onRefreshProjects();
   }
 
-  // --- LÓGICA DE IMPORTACIÓN ESPECIAL (COL A y COL C) ---
-  const handleImportExcel = (e, isComparison = false) => {
+  // --- LÓGICA DE ESCÁNER UNIVERSAL (PARA IMPORTAR Y COMPARAR) ---
+  const handleUniversalScanner = (e, isComparison = false) => {
     const file = e.target.files[0];
     if (!file) return;
+    
     const reader = new FileReader();
     reader.onload = async (evt) => {
       const wb = XLSX.read(evt.target.result, { type: 'binary' });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      // Convertimos a matriz de arreglos para manejar columnas A y C manualmente
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
       
       const processed = [];
+      const catalogCodes = materials.map(m => String(m.code));
+
       rows.forEach((row) => {
-        let code = String(row[0] || ''); // Columna A
-        let qty = parseInt(row[2]);      // Columna C
-        
-        if (code && !isNaN(qty)) {
-          if (code === '3502015') code = '3502015-FDT';
-          processed.push({ code, qty });
+        let foundCode = null;
+        let foundQty = null;
+
+        // Buscar código en la fila
+        row.forEach((cellValue) => {
+          let cleanValue = String(cellValue || '').trim();
+          if (cleanValue === '3502015') cleanValue = '3502015-FDT';
+          if (catalogCodes.includes(cleanValue)) foundCode = cleanValue;
+        });
+
+        // Si hay código, buscar el primer número en la fila
+        if (foundCode) {
+          row.forEach((cellValue) => {
+            if (typeof cellValue === 'number' && String(cellValue) !== foundCode) {
+              foundQty = cellValue;
+            }
+          });
+          if (foundQty !== null) processed.push({ code: foundCode, qty: foundQty });
         }
       });
+
+      if (processed.length === 0) return alert("No se detectaron códigos válidos en el archivo.");
 
       if (isComparison) {
         setCompareData(processed);
       } else {
+        setIsImporting(true);
         for (const item of processed) {
           const match = materials.find(m => m.code === item.code);
           if (match) await updateQty(match.id, item.qty);
         }
         await loadData();
-        alert("Importación de Columnas A y C completada.");
+        setIsImporting(false);
+        alert(`Escaneo exitoso: ${processed.length} materiales actualizados.`);
       }
     };
     reader.readAsBinaryString(file);
@@ -195,28 +213,22 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
     setMaterials(prev => prev.map(m => m.id === itemId ? {...m, qty: qty, updated_at: new Date().toISOString()} : m));
   }
 
-  // --- EXPORTACIÓN CON DATOS DE PROYECTO Y SOLO > 0 ---
   function exportExcel() {
     const nonZeroMaterials = materials.filter(m => m.qty > 0);
-    
-    // Crear encabezado con datos del proyecto
     const header = [
-      ["REPORTE DE MATERIALES FTTH"],
+      ["REPORTE TÉCNICO DE MATERIALES FTTH"],
       ["PROYECTO:", project.name],
       ["CÓDIGO:", project.project_number],
       ["CIUDAD:", project.city],
       ["INGENIERO:", project.engineer],
-      ["FECHA REPORTE:", new Date().toLocaleDateString()],
-      [], // Fila vacía
+      ["FECHA:", new Date().toLocaleDateString()],
+      [],
       ["CÓDIGO", "DESCRIPCIÓN", "CANTIDAD"]
     ];
-
     const dataRows = nonZeroMaterials.map(m => [m.code, m.desc, m.qty]);
-    const finalData = header.concat(dataRows);
-
-    const ws = XLSX.utils.aoa_to_sheet(finalData);
+    const ws = XLSX.utils.aoa_to_sheet(header.concat(dataRows));
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "BOM_PROYECTO");
+    XLSX.utils.book_append_sheet(wb, ws, "BOM");
     XLSX.writeFile(wb, `BOM_${project.name}.xlsx`);
   }
 
@@ -233,11 +245,9 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      {/* CABECERA Y EDICIÓN DE INFO */}
       <div className="flex flex-col md:flex-row justify-between items-start mb-8 gap-6">
         <div className="w-full md:w-auto">
           <button onClick={onBack} className="flex items-center text-blue-600 mb-2 font-bold hover:underline"><ArrowLeft size={18} className="mr-1"/> Volver</button>
-          
           {isEditingInfo ? (
             <form onSubmit={updateProjectInfo} className="bg-white p-4 rounded-2xl border shadow-sm space-y-3">
               <input value={project.name} className="border p-2 w-full rounded" onChange={e => setProject({...project, name: e.target.value})} />
@@ -245,10 +255,7 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
                 <input value={project.city} className="border p-2 w-1/2 rounded" onChange={e => setProject({...project, city: e.target.value})} />
                 <input value={project.engineer} className="border p-2 w-1/2 rounded" onChange={e => setProject({...project, engineer: e.target.value})} />
               </div>
-              <div className="flex gap-2">
-                <button type="submit" className="bg-blue-600 text-white px-4 py-1 rounded font-bold">Guardar</button>
-                <button type="button" onClick={() => setIsEditingInfo(false)} className="text-gray-500">Cancelar</button>
-              </div>
+              <button type="submit" className="bg-blue-600 text-white px-4 py-1 rounded font-bold">Guardar</button>
             </form>
           ) : (
             <div className="flex items-center gap-3">
@@ -256,19 +263,19 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
                 <h2 className="text-3xl font-black text-gray-900 uppercase">{project?.name}</h2>
                 <p className="text-gray-500 font-medium">{project?.city} | {project?.engineer}</p>
               </div>
-              <button onClick={() => setIsEditingInfo(true)} className="p-2 bg-gray-100 rounded-full text-gray-400 hover:text-blue-600"><Edit3 size={18}/></button>
+              <button onClick={() => setIsEditingInfo(true)} className="p-2 bg-gray-100 rounded-full text-gray-400 hover:text-blue-600 transition-colors"><Edit3 size={18}/></button>
             </div>
           )}
         </div>
 
         <div className="flex flex-wrap gap-3">
           <label className="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2.5 rounded-2xl font-bold cursor-pointer shadow-md flex items-center gap-2 transition-all">
-            <FileSpreadsheet size={20}/> Importar
-            <input type="file" className="hidden" onChange={(e) => handleImportExcel(e, false)} accept=".xlsx, .xls" />
+            <FileSpreadsheet size={20}/> Importar Excel
+            <input type="file" className="hidden" onChange={(e) => handleUniversalScanner(e, false)} accept=".xlsx, .xls" />
           </label>
           <label className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2.5 rounded-2xl font-bold cursor-pointer shadow-md flex items-center gap-2 transition-all">
-            <Scale size={20}/> Comparar
-            <input type="file" className="hidden" onChange={(e) => handleImportExcel(e, true)} accept=".xlsx, .xls" />
+            <Scale size={20}/> Comparar Excel
+            <input type="file" className="hidden" onChange={(e) => handleUniversalScanner(e, true)} accept=".xlsx, .xls" />
           </label>
           <button onClick={exportExcel} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-2xl flex items-center gap-2 font-bold shadow-md transition-all">
             <Download size={20}/> Exportar BOM
@@ -279,11 +286,11 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
       {/* DASHBOARD */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <div className="bg-white p-6 rounded-3xl shadow-sm border-l-8 border-blue-500">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Hilos Feeder</p>
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Hilos Feeder Utilizados</p>
           <h4 className="text-2xl font-black text-blue-900">{hilosUtilizados} <span className="text-sm font-normal text-gray-300">/ 144</span></h4>
         </div>
         <div className="bg-white p-6 rounded-3xl shadow-sm border-l-8 border-green-500">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Puertos Libres NAP</p>
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Puertos Libres 2do Nivel</p>
           <h4 className="text-2xl font-black text-green-900">{availablePorts}</h4>
         </div>
         <div className="bg-white p-6 rounded-3xl shadow-sm border-l-8 border-orange-500">
@@ -292,13 +299,13 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
         </div>
       </div>
 
-      {/* BUSCADOR Y FILTRO CERO */}
+      {/* BUSCADOR Y FILTROS */}
       <div className="flex flex-col md:flex-row gap-4 mb-6">
         <div className="relative flex-grow">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
           <input 
             type="text" 
-            placeholder="Buscar material..." 
+            placeholder="Buscar material por código o nombre..." 
             className="w-full pl-12 pr-4 py-4 bg-white border-2 border-gray-100 rounded-2xl shadow-sm focus:border-blue-500 outline-none transition-all font-medium"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
@@ -316,7 +323,7 @@ function ProjectEditor({ projectId, onBack, onRefreshProjects }) {
       {compareData && (
         <div className="mb-8 bg-purple-50 p-6 rounded-3xl border-2 border-purple-100 relative">
           <button onClick={() => setCompareData(null)} className="absolute top-4 right-4 text-purple-400 hover:text-red-500"><X/></button>
-          <h3 className="text-lg font-bold text-purple-900 mb-4 flex items-center gap-2"><Scale size={20}/> Comparación de Cantidades</h3>
+          <h3 className="text-lg font-bold text-purple-900 mb-4 flex items-center gap-2"><Scale size={20}/> Comparación Universal de Cantidades</h3>
           <div className="bg-white rounded-2xl overflow-hidden border border-purple-100">
             <table className="w-full text-sm">
               <thead className="bg-purple-100 text-purple-900">
